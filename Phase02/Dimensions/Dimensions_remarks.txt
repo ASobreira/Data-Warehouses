@@ -1,0 +1,8 @@
+Dimension Customer
+- 1 customer has several keys since it bought diferent products at diferent locations
+- StateKey instead of RegionKey
+
+Dimension GDP
+- GDP is a measure so needs to be on facts table, right?
+- Altered to mean per state so we can have unique keys
+	- Describe better in word (GDP =  mean from year to year per state)
