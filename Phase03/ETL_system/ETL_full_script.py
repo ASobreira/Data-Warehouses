@@ -85,7 +85,7 @@ holiday = pd.concat([new_row, holiday], ignore_index=True)
 holiday = holiday[holiday['Year'].isin([2012, 2013, 2014, 2015])]
 
 # Convert the column Date to a date data type
-holiday['Date'] = pd.to_datetime(holiday['Date'], infer_datetime_format = True)
+holiday['Date'] = pd.to_datetime(holiday['Date'])
 
 # Correct  " New Yearâ€™s Eve " & " Valentineâ€™s Day " 
 holiday["Holiday"] = holiday["Holiday"].replace({
@@ -284,7 +284,8 @@ GDP_Dimension = pd.merge(result[['State', 'State_Key_GDP']], gdp_pivot, on='Stat
 # Reorder the columns with 'State Key' as the first column
 GDP_Dimension = GDP_Dimension[['State_Key_GDP', 'State', 'Average_GDP_2012_billions', 'Average_GDP_2013_billions', 'Average_GDP_2014_billions', 'Average_GDP_2015_billions']]
 GDP_Dimension[['Average_GDP_2012_billions', 'Average_GDP_2013_billions', 'Average_GDP_2014_billions', 'Average_GDP_2015_billions']] = GDP_Dimension[['Average_GDP_2012_billions', 'Average_GDP_2013_billions', 'Average_GDP_2014_billions', 'Average_GDP_2015_billions']].div(1000000000).round(1)
-
+# Rename the column header
+GDP_Dimension = GDP_Dimension.rename(columns={'State': 'GDP_State'})
 
                                         ###### Ship_Date_Dimension ######
 #Empty DataFrame
@@ -393,15 +394,17 @@ Seller_Dimension = Seller_Dimension.reindex(columns=['Seller Key', 'Seller Name'
 
                                             ###### Customer_Dimension ###### 
 # Create the Customer Dimension DataFrame
-Customer_Dimension = customers_USA[['Customer ID', 'Customer Name', 'Segment', 'State', 'Region', 'City', 'Postal Code']]
+Customer_Dimension = customers_USA[['Customer ID', 'Customer Name', 'Segment', 'State', 'Region', 'City', 'Postal Code', 'Order Date']]
+# Rename the 'State' column to 'Customer_State'
+Customer_Dimension = Customer_Dimension.rename(columns={'State': 'Customer_State'})
 # Generate unique numerical identifiers for each customer
 Customer_Dimension['Customer Key'] = pd.factorize(Customer_Dimension['Customer ID'] + '_' + Customer_Dimension['City'])[0] + 1
 # Reorder the columns with 'Customer Key' as the first column
-Customer_Dimension = Customer_Dimension.reindex(columns=['Customer Key', 'Customer ID', 'Customer Name', 'Segment', 'State', 'Region', 'City', 'Postal Code']).copy()
-# Check if 'State Key Customer' column already exists
+Customer_Dimension = Customer_Dimension.reindex(columns=['Customer Key', 'Customer ID', 'Customer Name', 'Segment', 'Customer_State', 'Region', 'City', 'Postal Code', 'Order Date']).copy()
+# Check if 'State_Key_Customer' column already exists
 if 'State_Key_Customer' not in Customer_Dimension.columns:
     # Merge GDP_dimension and customer_dimension on 'State' column
-    Customer_Dimension = Customer_Dimension.merge(GDP_Dimension[['State', 'State_Key_GDP']], left_on='State', right_on='State', how='left')
+    Customer_Dimension = Customer_Dimension.merge(GDP_Dimension[['GDP_State', 'State_Key_GDP']], left_on='Customer_State', right_on='GDP_State', how='left')
     # Add a unique constraint to the State_Key column in Customer_Dimension
 Customer_Dimension.rename(columns=lambda x: x.replace(' ', '_'), inplace=True)
 Customer_Dimension.rename(columns={'State_Key_GDP': 'State_Key_Customer'}, inplace=True)
@@ -409,11 +412,22 @@ Customer_Dimension = Customer_Dimension.drop_duplicates(subset=['Customer_Key'])
 # Remove rows with specific customer names
 values_to_drop = ['Tom Zandusky', 'Cari MacIntyre', 'Kai Rey']
 Customer_Dimension = Customer_Dimension[~Customer_Dimension['Customer_Name'].isin(values_to_drop)]
+# Sort the DataFrame by 'Customer_Name' and 'Order_Date' in descending order
+Customer_Dimension = Customer_Dimension.sort_values(['Customer_Name', 'Order_Date'], ascending=[True, False])
+# Create a new column 'Status' and label it as 'Outdated' for all rows initially
+Customer_Dimension['Status'] = 'Outdated'
+# Iterate over unique customer names and update the 'Status' column accordingly
+for customer in Customer_Dimension['Customer_Name'].unique():
+    mask = Customer_Dimension['Customer_Name'] == customer
+    latest_date = Customer_Dimension.loc[mask, 'Order_Date'].max()
+    Customer_Dimension.loc[(mask) & (Customer_Dimension['Order_Date'] == latest_date), 'Status'] = 'Updated'
+Customer_Dimension = Customer_Dimension.rename(columns={'Segment': 'Customer_Segment', 'Region': 'Customer_Region', 'City': 'Customer_City', 'Postal_Code': 'Customer_Postal_Code'})
+Customer_Dimension.drop(['Order_Date'], axis=1, inplace=True)
 
 
-                                        ###### Customer_Dimension ###### 
+                                        ###### Facts Table ###### 
 # Read the orders data from Excel file
-orders = pd.read_excel('../Phase01/data/Raw_Tables/orders_RAW.xlsx')
+orders = pd.read_excel('orders_RAW.xlsx')
 # Remove unnecessary quotes from the City column
 orders['City'] = orders['City'].str.replace('[\'\"]', '')
 # Merge orders and product dimension based on Product ID
@@ -472,7 +486,9 @@ cursor.execute("DROP TABLE IF EXISTS Facts_Table CASCADE;")
 cursor.execute("DROP TABLE IF EXISTS Customer_Dimension CASCADE;")
 
 conn.commit()
-                                    ###### Holiday_Dimension ###### 
+                                    ###### Holiday_Dimension ######
+
+Holiday_start = time.time() 
 # Check transaction status and perform rollback if necessary
 if conn.status == pg.extensions.STATUS_IN_TRANSACTION:
     conn.rollback()
@@ -496,10 +512,9 @@ CREATE TABLE Holiday_Dimension (
   CHECK (Holiday_Key > 0)
 );
 """
-cursor.execute("DROP table IF EXISTS Holiday_Dimension;")
+cursor.execute("DROP table IF EXISTS Holiday_Dimension CASCADE;")
 cursor.execute(sql_Holiday_Dimension)
 conn.commit()
-
 # Load data into DB
 Holiday_Dimension_list = Holiday_Dimension.to_numpy().tolist()
 
@@ -508,8 +523,13 @@ sql_holiday = "INSERT INTO Holiday_Dimension(Full_Holiday_Date, Holiday_Key, Hol
 cursor.executemany(sql_holiday, Holiday_Dimension_list)
 conn.commit()
 
+Holiday_end = time.time() 
+print("Holiday Loaded: ", Holiday_end - Holiday_start)
+
+
 
                                     ###### GDP_Dimension ######
+GDP_start = time.time()                                   
 # Check transaction status and perform rollback if necessary
 if conn.status == pg.extensions.STATUS_IN_TRANSACTION:
     conn.rollback()
@@ -519,7 +539,7 @@ sql_GDP_Dimension = """
 
 CREATE TABLE GDP_Dimension (
   State_Key_GDP NUMERIC(9,0),
-  State VARCHAR(100) NOT NULL,
+  GDP_State VARCHAR(100) NOT NULL,
   Average_GDP_2012_billions FLOAT(2) NOT NULL,
   Average_GDP_2013_billions FLOAT(2) NOT NULL,
   Average_GDP_2014_billions FLOAT(2) NOT NULL,
@@ -539,15 +559,17 @@ conn.commit()
 cursor.execute(sql_GDP_Dimension)
 conn.commit()
 
-# Load data into DB
 GDP_Dimension_list = GDP_Dimension.to_numpy().tolist()
 
-sql_GDP = "INSERT INTO GDP_Dimension(State_Key_GDP, State, Average_GDP_2012_billions, Average_GDP_2013_billions, Average_GDP_2014_billions, Average_GDP_2015_billions) VALUES(%s, %s, %s, %s, %s, %s)"
+sql_GDP = "INSERT INTO GDP_Dimension(State_Key_GDP, GDP_State, Average_GDP_2012_billions, Average_GDP_2013_billions, Average_GDP_2014_billions, Average_GDP_2015_billions) VALUES(%s, %s, %s, %s, %s, %s)"
 
 cursor.executemany(sql_GDP, GDP_Dimension_list)
 conn.commit()
+GDP_end = time.time() 
+print("GDP Loaded: ", GDP_end - GDP_start)
 
                                     ###### Ship_Date_Dimension ######
+ship_start = time.time() 
 # Check transaction status and perform rollback if necessary
 if conn.status == pg.extensions.STATUS_IN_TRANSACTION:
     conn.rollback()
@@ -578,7 +600,7 @@ CREATE TABLE Ship_Date_Dimension (
 );
   
 """
-cursor.execute("DROP table IF EXISTS Ship_Date_Dimension;")
+cursor.execute("DROP table IF EXISTS Ship_Date_Dimension CASCADE;")
 cursor.execute(sql_Ship_Date_Dimension)
 conn.commit()
 # Load data into DB
@@ -588,9 +610,11 @@ sql_Ship_Date = "INSERT INTO Ship_Date_Dimension(Ship_Full_Date_Description, Shi
 
 cursor.executemany(sql_Ship_Date, Ship_Date_Dimension_list)
 conn.commit()
-
+ship_end = time.time() 
+print("Ship Date Loaded: ", ship_end - ship_start)
 
                                     ###### Order_Date_Dimension ######
+order_start = time.time() 
 # Check transaction status and perform rollback if necessary
 if conn.status == pg.extensions.STATUS_IN_TRANSACTION:
     conn.rollback()
@@ -621,7 +645,7 @@ CREATE TABLE Order_Date_Dimension (
 );
   
 """
-cursor.execute("DROP table IF EXISTS Order_Date_Dimension;")
+cursor.execute("DROP table IF EXISTS Order_Date_Dimension CASCADE ;")
 cursor.execute(sql_Order_Date_Dimension)
 conn.commit()
 
@@ -632,12 +656,11 @@ sql_Order_Date = "INSERT INTO Order_Date_Dimension(Order_Full_Date_Description, 
 
 cursor.executemany(sql_Order_Date, Order_Date_Dimension_list)
 conn.commit()
+order_end = time.time() 
+print("Order Date Loaded: ", order_end - order_start)
 
                                         ###### Product_Dimension ######
-# Check transaction status and perform rollback if necessary
-if conn.status == pg.extensions.STATUS_IN_TRANSACTION:
-    conn.rollback()
-
+product_start = time.time() 
 # Check transaction status and perform rollback if necessary
 if conn.status == pg.extensions.STATUS_IN_TRANSACTION:
     conn.rollback()
@@ -647,11 +670,11 @@ sql_Product_Dimension = """
 
 
 CREATE TABLE Product_Dimension (
-  Product_ID VARCHAR(500) NOT NULL,
+  Product_ID VARCHAR(255) NOT NULL,
   Product_Key  NUMERIC(9,0),
-  Product_Name VARCHAR(500) NOT NULL,
-  Category VARCHAR(500) NOT NULL,
-  Sub_Category VARCHAR(500) NOT NULL,
+  Product_Name VARCHAR(255) NOT NULL,
+  Category VARCHAR(255) NOT NULL,
+  Sub_Category VARCHAR(255) NOT NULL,
   
 --
   PRIMARY KEY (Product_Key),
@@ -659,7 +682,7 @@ CREATE TABLE Product_Dimension (
   CHECK (Product_Key > 0)
 );
 """
-cursor.execute("DROP table IF EXISTS Product_Dimension;")
+cursor.execute("DROP table IF EXISTS Product_Dimension CASCADE;")
 cursor.execute(sql_Product_Dimension)
 conn.commit()
 
@@ -670,8 +693,11 @@ sql_Ship_Date = "INSERT INTO Product_Dimension(Product_ID, Product_Key, Product_
 
 cursor.executemany(sql_Ship_Date, Product_Dimension_list)
 conn.commit()
+product_end = time.time() 
+print("Product Loaded: ", product_end - product_start)
 
                                         ###### Order_Information_Dimension ######
+order_info_start = time.time() 
 # Creating table
 
 if conn.status == pg.extensions.STATUS_IN_TRANSACTION:
@@ -692,7 +718,7 @@ CREATE TABLE Order_Information_Dimension (
   CHECK (Order_Key > 0)
 );
 """
-cursor.execute("DROP table IF EXISTS Order_Information_Dimension;")
+cursor.execute("DROP table IF EXISTS Order_Information_Dimension CASCADE;")
 cursor.execute(sql_Order_Information_Dimension)
 conn.commit()
 
@@ -705,9 +731,13 @@ sql_Order_Information = "INSERT INTO Order_Information_Dimension(Order_Key, Orde
 cursor.executemany(sql_Order_Information, Order_Information_Dimension_list)
 conn.commit()
 
+order_info_end = time.time() 
+print("Order Info Loaded: ", order_info_end - order_info_start)
+
 
 
                                 ###### Seller_Dimension ######
+seller_start = time.time() 
 # Creating table
 
 if conn.status == pg.extensions.STATUS_IN_TRANSACTION:
@@ -730,7 +760,7 @@ CREATE TABLE Seller_Dimension (
   CHECK (Seller_Key > 0)
 );
 """
-cursor.execute("DROP table IF EXISTS Seller_Dimension;")
+cursor.execute("DROP table IF EXISTS Seller_Dimension CASCADE;")
 cursor.execute(sql_Seller_Dimension)
 cursor.execute("TRUNCATE TABLE Seller_Dimension;")
 conn.commit()
@@ -744,8 +774,11 @@ sql_Seller_Dimension = "INSERT INTO Seller_Dimension(Seller_Key, Seller_Name, Se
 cursor.executemany(sql_Seller_Dimension, Seller_Dimension_list)
 conn.commit()
 
+seller_end = time.time() 
+print("Seller Loaded: ", seller_end - seller_start)
 
                                     ###### Customer_Dimension ######
+customer_start = time.time() 
 # Check transaction status and perform rollback if necessary
 if conn.status == pg.extensions.STATUS_IN_TRANSACTION:
     conn.rollback()
@@ -757,12 +790,13 @@ CREATE TABLE Customer_Dimension (
   Customer_Key NUMERIC(9,0),
   Customer_ID VARCHAR(100) NOT NULL,
   Customer_Name VARCHAR(100) NOT NULL,
-  Segment VARCHAR(100) NOT NULL,
-  State VARCHAR(100) NOT NULL,
-  Region VARCHAR(100) NOT NULL,
-  City VARCHAR(100) NOT NULL,
-  Postal_Code VARCHAR(100) NOT NULL,
+  Customer_Segment VARCHAR(100) NOT NULL,
+  Customer_State VARCHAR(100) NOT NULL,
+  Customer_Region VARCHAR(100) NOT NULL,
+  Customer_City VARCHAR(100) NOT NULL,
+  Customer_Postal_Code VARCHAR(100) NOT NULL,
   State_Key_Customer NUMERIC(9,0) NOT NULL,
+  Status VARCHAR(100) NOT NULL,
   
 --
   PRIMARY KEY (Customer_Key),
@@ -772,20 +806,23 @@ CREATE TABLE Customer_Dimension (
   CHECK (Customer_Key > 0)
 );
 """
-cursor.execute("DROP table IF EXISTS Customer_Dimension;")
+cursor.execute("DROP table IF EXISTS Customer_Dimension CASCADE;")
 cursor.execute(sql_Customer_Dimension)
 conn.commit()
 
 # Load data into DB
-Customer_Dimension_list = Customer_Dimension.to_numpy().tolist()
+Customer_Dimension_list = Customer_Dimension.loc[:, ['Customer_Key', 'Customer_ID', 'Customer_Name', 'Customer_Segment', 'Customer_State', 'Customer_Region', 'Customer_City', 'Customer_Postal_Code', 'State_Key_Customer', 'Status']].values.tolist()
 
-sql_Customer = "INSERT INTO Customer_Dimension(Customer_Key, Customer_ID, Customer_Name, Segment, State, Region, City, Postal_Code, State_Key_Customer) VALUES(%s, %s, %s, %s, %s, %s, %s, %s, %s)"
+sql_Customer = "INSERT INTO Customer_Dimension(Customer_Key, Customer_ID, Customer_Name, Customer_Segment, Customer_State, Customer_Region, Customer_City, Customer_Postal_Code, State_Key_Customer, Status) VALUES(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
 
 cursor.executemany(sql_Customer, Customer_Dimension_list)
 conn.commit()
 
+customer_end = time.time() 
+print("Customer Loaded: ", customer_end - customer_start)
+
                                     ###### Facts_Table ######
-                                    
+fact_start = time.time()
 # Check transaction status and perform rollback if necessary
 if conn.status == pg.extensions.STATUS_IN_TRANSACTION:
     conn.rollback()
@@ -837,6 +874,8 @@ VALUES(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
 
 cursor.executemany(sql_facts, Facts_Table_list)
 conn.commit()
+fact_end = time.time() 
+print("Facts Loaded: ", fact_end - fact_start)
 
 
 end = time.time()
